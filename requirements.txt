@@ -2,6 +2,6 @@ fastapi
 uvicorn
 librosa
 soundfile
-numpy
-tflite-runtime
+numpy==1.26.4
+tflite-runtime==2.15.0
 python-multipart
