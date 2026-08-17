@@ -5,3 +5,4 @@ soundfile
 numpy==1.26.4
 tflite-runtime==2.14.0
 python-multipart
+pydub
