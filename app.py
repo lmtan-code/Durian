@@ -9,6 +9,7 @@ import tflite_runtime.interpreter as tflite
 
 app = FastAPI()
 
+# CHO PHÉP APP MOBILE GỌI ĐẾN SERVER
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CẤU HÍNH ---
+# --- CẤU HÝNH ---
 FS = 44100; PROCESS_DURATION = 0.7 
 N_MFCC = 30; MAX_PAD_LEN = 100; USE_DELTAS = True 
 
@@ -28,24 +29,28 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
+# TÌM INDEX CHUẨN: Dựa vào số chiều (Shape) thay vì tên
 input_audio_idx = -1
 input_phys_idx = -1
 for i, d in enumerate(input_details):
-    if 'audio' in d['name'].lower(): input_audio_idx = i
-    elif 'physics' in d['name'].lower(): input_phys_idx = i
+    # Input Audio của CNN luôn có 4 chiều: [None, 124, 100, 1]
+    if len(d['shape']) == 4: 
+        input_audio_idx = i
+    # Input Physics luôn có 2 chiều: [None, 6]
+    elif len(d['shape']) == 2: 
+        input_phys_idx = i
+
+print(f"✅ Model loaded | Audio Index: {input_audio_idx}, Physics Index: {input_phys_idx}")
 
 # --- 2. LẤY NHÃN & STATS ---
 labels = np.load("label_classes.npy", allow_pickle=True)
 labels_mapping = {idx: str(label).lower().strip() for idx, label in enumerate(labels)}
-NOISE_LABELS = {v for v in labels_mapping.values() if v not in ('dutuoi', 'xanh', 'du_tuoi')}
 
 stats = np.load("mfcc_stats.npz")
 mean = stats["mean"].squeeze()
 std = stats["std"].squeeze()
 phys_mean = stats["phys_mean"].squeeze()
 phys_scale = stats["phys_scale"].squeeze()
-
-print(f"✅ Model loaded | Classes: {list(labels_mapping.values())}")
 
 # --- 3. FEATURE EXTRACTION ---
 def fix_length_infer(y, sr, target_duration=PROCESS_DURATION):
@@ -62,6 +67,7 @@ def preprocess_for_model(y, sr):
 def _frames_to_seconds(n_frames, hop_length, sr):
     return float(n_frames) * hop_length / sr
 
+# Hàm Physics chuẩn của TrainCNN_v12
 def compute_physics_features(y, sr, hop_length=512):
     rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     rms_max = np.max(rms)
@@ -104,6 +110,7 @@ def compute_physics_features(y, sr, hop_length=512):
 
     return np.array([res_freq, decay_time, beta, spec_bw_mean, attack_time, rolloff_mean], dtype=np.float32)
 
+# Logic xử lý ma trận MFCC chuẩn của durian.py
 def extract_mfcc_from_array(y, sr, mean, std):
     try:
         L = int(sr * PROCESS_DURATION)
@@ -168,10 +175,10 @@ async def predict_audio(
     try:
         audio_bytes = await file.read()
         
-        # Chống lỗi nếu điện thoại gửi file rỗng
         if len(audio_bytes) == 0:
             return JSONResponse({"error": "File âm thanh trống (0 byte)"})
 
+        # Chuyển đổi WebM sang WAV bằng Pydub
         try:
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
             wav_buffer = io.BytesIO()
@@ -194,7 +201,9 @@ async def predict_audio(
         if np.any(np.isnan(mfcc_features)) or np.any(np.isnan(phys_norm)): 
             return JSONResponse({"error": "NaN/Inf detected"})
 
-        input_audio = np.expand_dims(mfcc_features, axis=0).astype(np.float32)
+        # --- ĐÚNG CHUẨN SHAPE CỦA CNN ---
+        # Biến (124, 100) thành (1, 124, 100, 1) để khớp với Conv2D
+        input_audio = mfcc_features[np.newaxis, ..., np.newaxis].astype(np.float32)
         input_physics = np.expand_dims(phys_norm, axis=0).astype(np.float32)
         
         interpreter.set_tensor(input_audio_idx, input_audio)
