@@ -2,18 +2,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Cài đặt các thư viện hệ thống cần thiết cho Librosa và Soundfile
+# Cài đặt ffmpeg để đọc định dạng WebM từ điện thoại
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libsndfile1 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy và cài đặt các thư viện Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy toàn bộ code và model vào máy chủ
 COPY . .
 
-# Chạy server
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port $PORT"]
