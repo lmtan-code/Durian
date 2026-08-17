@@ -1,7 +1,7 @@
 import os, io
 import numpy as np
 import librosa
-import soundfile as sf
+from pydub import AudioSegment  # Dùng để chuyển đổi WebM sang WAV
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CẤU HÌNH ---
+# --- CẤU HÝNH ---
 FS = 44100; PROCESS_DURATION = 0.7; N_MFCC = 30; MAX_PAD_LEN = 100; USE_DELTAS = True
 
 # --- TẢI MODEL TFLITE ---
@@ -27,8 +27,19 @@ interpreter = tflite.Interpreter(model_path="sound_model_hybrid.tflite")
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-input_audio_idx = next(i for i, d in enumerate(input_details) if 'audio' in d['name'].lower())
-input_phys_idx = next(i for i, d in enumerate(input_details) if 'physics' in d['name'].lower())
+
+# Tìm đúng index của 2 đầu vào (Audio và Physics) một cách an toàn
+input_audio_idx = -1
+input_phys_idx = -1
+for i, d in enumerate(input_details):
+    if 'audio' in d['name'].lower():
+        input_audio_idx = i
+    elif 'physics' in d['name'].lower():
+        input_phys_idx = i
+
+if input_audio_idx == -1 or input_phys_idx == -1:
+    print("CẢNH BÁO: Không tìm thấy tên đầu vào. Đang dùng thứ tự mặc định.")
+    input_audio_idx, input_phys_idx = 0, 1
 
 # --- TẢI STATS VÀ LABELS ---
 labels = np.load("label_classes.npy", allow_pickle=True)
@@ -37,7 +48,7 @@ stats = np.load("mfcc_stats.npz")
 mean = stats["mean"].squeeze(); std = stats["std"].squeeze()
 phys_mean = stats["phys_mean"].squeeze(); phys_scale = stats["phys_scale"].squeeze()
 
-# --- TOÀN BỘ HÀM XỬ LÝ ÂM THANH ---
+# --- CÁC HÀM XỬ LÝ ÂM THANH ---
 def fix_length_infer(y, sr, target_duration=PROCESS_DURATION):
     L = int(sr * target_duration)
     return np.pad(y, (0, L - len(y)), mode='constant') if len(y) < L else y[:L]
@@ -52,32 +63,67 @@ def preprocess_for_model(y, sr):
 def _frames_to_seconds(n_frames, hop_length, sr):
     return float(n_frames) * hop_length / sr
 
+# =====================================================================
+# ĐÂY LÀ HÀM ĐÃ ĐƯỢC FIX CHUẨN 100% THEO TRAINCNN_HYBRID_V12
+# =====================================================================
 def compute_physics_features(y, sr, hop_length=512):
-    fft = np.abs(np.fft.rfft(y)); freqs = np.fft.rfftfreq(len(y), 1/sr)
-    window_size = 5
-    fft_smooth = np.convolve(fft, np.ones(window_size)/window_size, mode='same') if len(fft) > window_size else fft
-    res_freq = freqs[np.argmax(fft_smooth[1:]) + 1] if len(fft_smooth) > 1 else 0.0
-    env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
-    A0 = np.max(env)
-    if A0 < 1e-6: return np.array([0.0]*6, dtype=np.float32)
-    peak_idx_env = int(np.argmax(env)); env_after_peak = env[peak_idx_env:]
-    threshold = 0.1 * A0
-    decay_idx_rel = np.where(env_after_peak < threshold)[0]
-    n_decay_frames = decay_idx_rel[0] if len(decay_idx_rel) > 0 else len(env_after_peak)
+    # 1. TÍNH RMS ENVELOPE (Biên độ thực tế)
+    rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+    rms_max = np.max(rms)
+    
+    if rms_max < 1e-6: 
+        return np.array([0.0] * 6, dtype=np.float32)
+        
+    peak_idx = int(np.argmax(rms))
+    threshold = 0.1 * rms_max  # Ngưỡng 10%
+    
+    # 2. ATTACK TIME (Tính từ lúc vượt ngưỡng đến đỉnh)
+    try: 
+        start_idx = np.where(rms > threshold)[0][0]
+    except IndexError: 
+        start_idx = 0
+        
+    if peak_idx < start_idx: peak_idx = start_idx
+    attack_time = _frames_to_seconds(peak_idx - start_idx, hop_length, sr)
+    
+    # 3. DECAY TIME & BETA (Tính từ đỉnh RMS trở đi)
+    rms_after_peak = rms[peak_idx:]
+    decay_idx_rel = np.where(rms_after_peak < threshold)[0]
+    n_decay_frames = decay_idx_rel[0] if len(decay_idx_rel) > 0 else len(rms_after_peak)
     decay_time = _frames_to_seconds(n_decay_frames, hop_length, sr)
-    At = env_after_peak[-1] + 1e-6
-    n_decay_span_frames = len(env) - peak_idx_env
-    decay_span_sec = _frames_to_seconds(n_decay_span_frames, hop_length, sr)
-    beta = np.log(A0 / At) / decay_span_sec if decay_span_sec > 0 else 0.0
-    spec_bw_mean = np.mean(librosa.feature.spectral_bandwidth(y=y, sr=sr, hop_length=hop_length)[0])
-    rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]; rms_max = np.max(rms)
-    if rms_max < 1e-6: attack_time = 0.0
-    else:
-        try: start_idx = np.where(rms > 0.01 * rms_max)[0][0]
-        except IndexError: start_idx = 0
-        peak_idx_rms = max(np.argmax(rms), start_idx)
-        attack_time = _frames_to_seconds(peak_idx_rms - start_idx, hop_length, sr)
-    rolloff_mean = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr, hop_length=hop_length)[0])
+    
+    At = rms_after_peak[-1] + 1e-6
+    decay_span_sec = _frames_to_seconds(len(rms_after_peak), hop_length, sr)
+    beta = np.log(rms_max / At) / decay_span_sec if decay_span_sec > 0 else 0.0
+    
+    # 4. RESONANT FREQUENCY (Tần số cộng hưởng)
+    pad_samples = int(0.05 * sr)
+    start_sample = max(0, (peak_idx * hop_length) - pad_samples)
+    end_sample = min(len(y), (peak_idx * hop_length) + pad_samples + hop_length)
+    y_segment = y[start_sample:end_sample]
+    
+    fft = np.abs(np.fft.rfft(y_segment))
+    window_size = 7
+    if len(fft) > window_size: 
+        fft_smooth = np.convolve(fft, np.ones(window_size) / window_size, mode='same')
+    else: 
+        fft_smooth = fft
+        
+    freqs = np.fft.rfftfreq(len(y_segment), 1 / sr)
+    res_freq = freqs[np.argmax(fft_smooth[1:]) + 1] if len(fft_smooth) > 1 else 0.0
+
+    # 5. SPECTRAL BANDWIDTH & ROLLOFF (Chỉ tính ở những frame có âm thanh)
+    valid_frames_mask = rms > threshold
+    spec_bw_mean = 0.0
+    rolloff_mean = 0.0
+    
+    if np.any(valid_frames_mask):
+        spec_bw = librosa.feature.spectral_bandwidth(y=y, sr=sr, hop_length=hop_length)[0]
+        spec_bw_mean = np.mean(spec_bw[valid_frames_mask])
+        
+        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, hop_length=hop_length)[0]
+        rolloff_mean = np.mean(rolloff[valid_frames_mask])
+
     return np.array([res_freq, decay_time, beta, spec_bw_mean, attack_time, rolloff_mean], dtype=np.float32)
 
 def extract_mfcc_from_array(y, sr, mean, std):
@@ -115,14 +161,24 @@ async def predict_audio(
 ):
     try:
         audio_bytes = await file.read()
-        # THÊM BACKEND="FFMPEG" ĐỂ ĐỌC ĐỊNH DẠNG WEBM TỪ ĐIỆN THOẠI
-        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=FS, backend="ffmpeg")
+        
+        # Chuyển đổi WebM (từ điện thoại) thành WAV
+        try:
+            audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            wav_buffer = io.BytesIO()
+            audio.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
+            y, sr = librosa.load(wav_buffer, sr=FS) 
+        except Exception as e:
+            return JSONResponse({"error": f"Lỗi đọc âm thanh: {str(e)}"})
+
         raw_rms = float(np.sqrt(np.mean(y**2)))
         audio_model = preprocess_for_model(y, FS)
         
         mfcc_features = extract_mfcc_from_array(audio_model, FS, mean, std)
         if mfcc_features is None: return JSONResponse({"error": "Lỗi MFCC"})
         
+        # Dùng đúng hàm Physics mới
         physics_raw = compute_physics_features(audio_model, FS)
         phys_norm = (physics_raw - phys_mean) / phys_scale
         
