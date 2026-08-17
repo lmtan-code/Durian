@@ -17,8 +17,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CẤU HÍNH (Đúng như durian.py) ---
-FS = 44100; DURATION = 1.0; PROCESS_DURATION = 0.7 
+# --- CẤU HÍNH ---
+FS = 44100; PROCESS_DURATION = 0.7 
 N_MFCC = 30; MAX_PAD_LEN = 100; USE_DELTAS = True 
 
 # --- 1. TẢI MODEL TFLITE ---
@@ -28,14 +28,13 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Tìm index chính xác của 2 đầu vào
 input_audio_idx = -1
 input_phys_idx = -1
 for i, d in enumerate(input_details):
     if 'audio' in d['name'].lower(): input_audio_idx = i
     elif 'physics' in d['name'].lower(): input_phys_idx = i
 
-# --- 2. LẤY NHÃN & STATS (Bám sát logic class DurianH5Model trong durian.py) ---
+# --- 2. LẤY NHÃN & STATS ---
 labels = np.load("label_classes.npy", allow_pickle=True)
 labels_mapping = {idx: str(label).lower().strip() for idx, label in enumerate(labels)}
 NOISE_LABELS = {v for v in labels_mapping.values() if v not in ('dutuoi', 'xanh', 'du_tuoi')}
@@ -44,7 +43,7 @@ stats = np.load("mfcc_stats.npz")
 mean = stats["mean"].squeeze()
 std = stats["std"].squeeze()
 phys_mean = stats["phys_mean"].squeeze()
-phys_scale = stats["phys_scale"].squeeze() # Tương đương phys_std
+phys_scale = stats["phys_scale"].squeeze()
 
 print(f"✅ Model loaded | Classes: {list(labels_mapping.values())}")
 
@@ -63,7 +62,6 @@ def preprocess_for_model(y, sr):
 def _frames_to_seconds(n_frames, hop_length, sr):
     return float(n_frames) * hop_length / sr
 
-# Dùng hàm Physics chuẩn của TrainCNN_v12 (Đã fix lỗi thời gian suy hao)
 def compute_physics_features(y, sr, hop_length=512):
     rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     rms_max = np.max(rms)
@@ -106,7 +104,6 @@ def compute_physics_features(y, sr, hop_length=512):
 
     return np.array([res_freq, decay_time, beta, spec_bw_mean, attack_time, rolloff_mean], dtype=np.float32)
 
-# Giữ nguyên logic xử lý ma trận MFCC chuẩn của durian.py
 def extract_mfcc_from_array(y, sr, mean, std):
     try:
         L = int(sr * PROCESS_DURATION)
@@ -147,9 +144,8 @@ def extract_mfcc_from_array(y, sr, mean, std):
         print("MFCC error:", e)
         return None
 
-# --- 4. LOGIC RA QUYẾT ĐỊNH (Chuyển đổi chuẩn xác từ _make_decision của durian.py) ---
+# --- 4. LOGIC RA QUYẾT ĐỊNH ---
 def make_decision(label, conf, rms, rms_thresh, dt_thresh, xn_thresh):
-    # conf và dt_thresh/xn_thresh đều đang ở dạng % (VD: 65.0 và 50.0)
     if label in ("dutuoi", "du_tuoi"):
         if rms <= rms_thresh: return "MỜI GÕ LẠI", "gray"
         if conf >= dt_thresh: return "ĐỦ TUỔI", "#e67e22"
@@ -161,7 +157,7 @@ def make_decision(label, conf, rms, rms_thresh, dt_thresh, xn_thresh):
     else:
         return "NOISE", "#3498db"
 
-# --- 5. API DỰ ĐOÁN (Giống flow predict() của durian.py) ---
+# --- 5. API DỰ ĐOÁN ---
 @app.post("/predict")
 async def predict_audio(
     file: UploadFile = File(...),
@@ -172,6 +168,10 @@ async def predict_audio(
     try:
         audio_bytes = await file.read()
         
+        # Chống lỗi nếu điện thoại gửi file rỗng
+        if len(audio_bytes) == 0:
+            return JSONResponse({"error": "File âm thanh trống (0 byte)"})
+
         try:
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
             wav_buffer = io.BytesIO()
@@ -197,7 +197,6 @@ async def predict_audio(
         input_audio = np.expand_dims(mfcc_features, axis=0).astype(np.float32)
         input_physics = np.expand_dims(phys_norm, axis=0).astype(np.float32)
         
-        # Dùng TFLite thay vì Keras
         interpreter.set_tensor(input_audio_idx, input_audio)
         interpreter.set_tensor(input_phys_idx, input_physics)
         interpreter.invoke()
@@ -207,15 +206,13 @@ async def predict_audio(
         raw_label = labels_mapping.get(predicted_idx, "Unknown")
         confidence = float(np.max(prediction)) * 100.0
 
-        # Gọi hàm quyết định chuẩn của durian.py
         decision_label, decision_color = make_decision(raw_label, confidence, raw_rms, rms_thresh, dt_thresh, xn_thresh)
         
-        # Trả về kết quả giống hệt format trả về của durian.py
         return {
             'raw_label': raw_label, 'confidence': confidence,
             'raw_rms': raw_rms, 'decision_label': decision_label, 
             'color': decision_color, 
-            'decision': decision_label # Thêm trường này cho App Mobile dễ đọc
+            'decision': decision_label
         }
     except Exception as e:
         return JSONResponse({"error": str(e)})
