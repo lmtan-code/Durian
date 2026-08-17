@@ -149,14 +149,14 @@ def extract_mfcc_from_array(y, sr, mean, std):
 
 # --- 4. LOGIC RA QUYẾT ĐỊNH (Chuyển đổi chuẩn xác từ _make_decision của durian.py) ---
 def make_decision(label, conf, rms, rms_thresh, dt_thresh, xn_thresh):
-    # Vì App gửi dt_thresh=50.0 (%), nên phải chia cho 100 để khớp với code durian.py
+    # conf và dt_thresh/xn_thresh đều đang ở dạng % (VD: 65.0 và 50.0)
     if label in ("dutuoi", "du_tuoi"):
         if rms <= rms_thresh: return "MỜI GÕ LẠI", "gray"
-        if (conf / 100.0) >= (dt_thresh / 100.0): return "ĐỦ TUỔI", "#e67e22"
+        if conf >= dt_thresh: return "ĐỦ TUỔI", "#e67e22"
         return "MỜI GÕ LẠI", "gray"
     elif label == "xanh":
         if rms <= rms_thresh: return "MỜI GÕ LẠI", "gray"
-        if (conf / 100.0) >= (xn_thresh / 100.0): return "XANH", "#27ae60"
+        if conf >= xn_thresh: return "XANH", "#27ae60"
         return "MỜI GÕ LẠI", "gray"
     else:
         return "NOISE", "#3498db"
