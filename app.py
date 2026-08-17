@@ -9,7 +9,7 @@ import tflite_runtime.interpreter as tflite
 
 app = FastAPI()
 
-# FIX LỖI CORS ĐỂ APP MOBILE CÓ THỂ GỌI ĐƯỢC
+# CHO PHÉP APP MOBILE GỌI ĐẾN SERVER
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -115,7 +115,8 @@ async def predict_audio(
 ):
     try:
         audio_bytes = await file.read()
-        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=FS)
+        # THÊM BACKEND="FFMPEG" ĐỂ ĐỌC ĐỊNH DẠNG WEBM TỪ ĐIỆN THOẠI
+        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=FS, backend="ffmpeg")
         raw_rms = float(np.sqrt(np.mean(y**2)))
         audio_model = preprocess_for_model(y, FS)
         
